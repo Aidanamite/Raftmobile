@@ -200,20 +200,34 @@ namespace Raftmobile
         {
             var r = Main.CreateObject<RGD_Storage>();
             r.CopyFieldsOf(base.GetBlockCreationData());
-            var s = Main.CreateObject<RGD_Slot>();
-            var m = new MemoryStream();
-            Main.formatter.Serialize(m, shed.spawnedSnowmobile.GetRGD());
-            while (m.Position % 4 != 0)
-                m.WriteByte(0);
-            s.exclusiveString = Encoding.Unicode.GetString(m.ToArray());
-            r.slots = new[] { s };
+            try
+            {
+                var s = Main.CreateObject<RGD_Slot>();
+                var m = new MemoryStream();
+                Main.formatter.Serialize(m, shed.spawnedSnowmobile.GetRGD());
+                while (m.Position % 4 != 0)
+                    m.WriteByte(0);
+                s.exclusiveString = Encoding.Unicode.GetString(m.ToArray());
+                r.slots = new[] { s };
+            } catch (Exception e)
+            {
+                Debug.LogError($"[Raftmobile Shed {transform.localPosition}]: Failed to save snowmobile to data\n\n{e}");
+            }
             return r;
         }
         public override RGD Serialize_Save() => GetBlockCreationData();
         public void Restore(RGD_Block block)
         {
-            if (block is RGD_Storage)
-                shed.Restore(Main.formatter.Deserialize(new MemoryStream(Encoding.Unicode.GetBytes((block as RGD_Storage).slots[0].exclusiveString))) as RGD_Snowmobile);
+            if (block is RGD_Storage storage)
+                try
+                {
+                    using (var data = new MemoryStream(Encoding.Unicode.GetBytes(storage.slots[0].exclusiveString)))
+                        shed.Restore(Main.formatter.Deserialize(data) as RGD_Snowmobile);
+                }
+                catch (Exception e1)
+                {
+                    Debug.LogError($"[Raftmobile Shed {transform.localPosition}]: Failed to restore snowmobile from data\n\n{e1}");
+                }
         }
         public override void OnFinishedPlacement()
         {
@@ -279,9 +293,11 @@ namespace Raftmobile
     {
         public override Type BindToType(string assemblyName, string typeName)
         {
-            string exeAssembly = Assembly.GetExecutingAssembly().FullName;
-            Type typeToDeserialize = Type.GetType($"{typeName}, {exeAssembly}");
-            return typeToDeserialize;
+            var result = Type.GetType($"{typeName}, {assemblyName}");
+            if (result != null)
+                return result;
+            result = Type.GetType($"{typeName}, {Assembly.GetExecutingAssembly().FullName}");
+            return result;
         }
     }
 

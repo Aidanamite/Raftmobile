@@ -101,14 +101,19 @@
       <HintPath>D:\Steam\steamapps\common\Raft\Raft_Data/Managed\System.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="System.Runtime.Serialization" />
     <Reference Include="System.Security.dll">
       <HintPath>D:\Steam\steamapps\common\Raft\Raft_Data/Managed\System.Security.dll</HintPath>
       <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Xml">
+      <HintPath>..\..\..\..\..\..\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Xml.dll</HintPath>
     </Reference>
     <Reference Include="System.Xml.dll">
       <HintPath>D:\Steam\steamapps\common\Raft\Raft_Data/Managed\System.Xml.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="System.Xml.Linq" />
     <Reference Include="Tayx.Graphy.dll">
       <HintPath>D:\Steam\steamapps\common\Raft\Raft_Data/Managed\Tayx.Graphy.dll</HintPath>
       <Private>False</Private>
