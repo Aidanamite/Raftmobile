@@ -46,7 +46,9 @@
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <ItemGroup>
     <None Include="build.bat" />
+    <None Include="lz4.tpk" />
     <None Include="modinfo.json" />
+    <None Include="templatebundle" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Assembly-CSharp-firstpass.dll">
@@ -56,6 +58,9 @@
     <Reference Include="Assembly-CSharp.dll">
       <HintPath>D:\Steam\steamapps\common\Raft\Raft_Data/Managed\Assembly-CSharp.dll</HintPath>
       <Private>False</Private>
+    </Reference>
+    <Reference Include="AssetsTools.NET">
+      <HintPath>.\AssetsTools.NET.dll</HintPath>
     </Reference>
     <Reference Include="Autodesk.Fbx.dll">
       <HintPath>D:\Steam\steamapps\common\Raft\Raft_Data/Managed\Autodesk.Fbx.dll</HintPath>
@@ -428,8 +433,10 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Content Include="AssetsTools.NET.dll" />
     <Content Include="banner.jpg" />
     <Content Include="icon.png" />
+    <Content Include="SnowmobileStation.png" />
   </ItemGroup>
   <PropertyGroup>
     <PreBuildEvent>

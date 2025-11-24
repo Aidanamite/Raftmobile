@@ -16,8 +16,14 @@ using Newtonsoft.Json;
 using I2.Loc;
 using System.Text;
 using UnityEngine.SceneManagement;
+using RaftModLoader;
 using Debug = UnityEngine.Debug;
 using Object = UnityEngine.Object;
+using AssetsTools.NET;
+using AssetsTools.NET.Extra;
+using FMOD;
+using System.Threading.Tasks;
+using static SO_TradingPost_Buyable;
 
 
 namespace Raftmobile
@@ -31,14 +37,24 @@ namespace Raftmobile
         public static LanguageSourceData language;
         public static Block_SnowmobileStation waitingToInitialize;
         public static BinaryFormatter formatter = new BinaryFormatter() { Binder = new PreMergeToMergedDeserializationBinder() };
-        public void Start()
+        public IEnumerator Start()
         {
             if (RAPI.IsCurrentSceneGame() && Raft_Network.IsHost && ComponentManager<Raft_Network>.Value.remoteUsers.Count > 1)
             {
                 Debug.LogError("[Raftmobile]: Cannot load while in a multiplayer");
                 modlistEntry.modinfo.unloadBtn.GetComponent<Button>().onClick.Invoke();
-                return;
+                yield break;
             }
+            var loadingNote = HNotify.instance.AddNotification(HNotify.NotificationType.spinning, $"Loading [{name}]");
+            IEnumerator AutoClose()
+            {
+                while (this && loadingNote)
+                    yield return null;
+                if (loadingNote)
+                    loadingNote.Close();
+                yield break;
+            }
+            loadingNote.StartCoroutine(AutoClose());
             loaded = true;
             prefabHolder = new GameObject("prefabHolder").transform;
             prefabHolder.gameObject.SetActive(false);
@@ -114,33 +130,126 @@ namespace Raftmobile
             RAPI.RegisterItem(stationItem);
 
             (harmony = new Harmony("com.aidanamite.Raftmobile")).PatchAll();
-            StartCoroutine(UseScene("55#Landmark_Temperance#", TryInitialize));
+            yield return UseScene("55#Landmark_Temperance#", TryInitialize);
             Traverse.Create(typeof(LocalizationManager)).Field("OnLocalizeEvent").GetValue<LocalizationManager.OnLocalizeCallback>().Invoke();
             Log("Mod has been loaded!");
+            loadingNote.Close();
+            var cached = Path.Combine(HLib.path_cacheFolder_mods, HCacheManager.GetCachedModFileName(modlistEntry));
+            if (File.Exists(cached))
+                File.Delete(cached);
+            yield break;
         }
 
         IEnumerator UseScene(string sceneName, Action onComplete)
         {
             if (SceneManager.GetSceneByName(sceneName).isLoaded)
             {
+                Log("Initializing without using cache");
                 onComplete();
                 yield break;
             }
-            var async = SceneManager.LoadSceneAsync(sceneName, LoadSceneMode.Additive);
-            async.allowSceneActivation = false;
-            async.completed += delegate
+            var sceneInd = SceneUtility.GetBuildIndexByScenePath(sceneName);
+            if (sceneInd == -1)
+                throw new FileNotFoundException($"No scene called \"{sceneName}\" was found");
+            AssetBundleCreateRequest req = null;
+            try
+            { 
+                if (File.Exists("Mods\\RaftmobileCache\\target") && File.Exists("Mods\\RaftmobileCache\\loader"))
+                {
+                    var lines = File.ReadAllLines("Mods\\RaftmobileCache\\target");
+                    if (lines?.Length == 2 && int.TryParse(lines[0],out var val) && val == sceneInd && long.TryParse(lines[1],out var time) && time == File.GetLastWriteTimeUtc("Raft_Data\\level" + val).Ticks)
+                        req = AssetBundle.LoadFromFileAsync("Mods\\RaftmobileCache\\loader");
+                }
+            }
+            catch (Exception e)
             {
-                harmony.Unpatch(typeof(RConsole).GetMethod("HandleUnityLog", BindingFlags.Instance | BindingFlags.NonPublic), HarmonyPatchType.Prefix, harmony.Id);
+                Debug.LogWarning("An exception occured trying to fetch the level cache\n" + e);
+            }
+            if (req != null)
+            {
+                yield return req;
+                if (req.assetBundle)
+                {
+                    var sceneReq = req.assetBundle.LoadAssetAsync("scene");
+                    yield return sceneReq;
+                    Log("Initializing using cache");
+                    try
+                    {
+                        onComplete();
+                    }
+                    finally
+                    {
+                        req.assetBundle.Unload(true);
+                    }
+                    yield break;
+                }
+            }
+            var task = CreateLoaderAsync(sceneInd);
+            yield return new WaitUntil(() => task.IsCompleted);
+            req = AssetBundle.LoadFromFileAsync("Mods\\RaftmobileCache\\loader");
+            yield return req;
+            if (!req.assetBundle)
+                yield break;
+            var sceneReq2 = req.assetBundle.LoadAssetAsync("scene");
+            yield return sceneReq2;
+            Log("Generated cache and initializing");
+            try
+            {
                 onComplete();
-                foreach (var g in SceneManager.GetSceneByName(sceneName).GetRootGameObjects())
-                    DestroyImmediate(g);
-                SceneManager.UnloadSceneAsync(sceneName);
-            };
-            while (async.progress < 0.9f)
-                yield return null;
-            harmony.Patch(typeof(RConsole).GetMethod("HandleUnityLog", BindingFlags.Instance | BindingFlags.NonPublic), new HarmonyMethod(typeof(Patch_Log),nameof(Patch_Log.Prefix)));
-            async.allowSceneActivation = true;
+            }
+            finally
+            {
+                req.assetBundle.Unload(false);
+            }
             yield break;
+        }
+
+        Task CreateLoaderAsync(int sceneInd) => Task.Run(() => CreateLoader(sceneInd));
+        void CreateLoader(int sceneInd)
+        {
+            try
+            {
+                var manager = new AssetsManager();
+                using (var data = new MemoryStream(GetEmbeddedFileBytes("lz4.tpk"))) manager.LoadClassPackage(data);
+                AssetsFileInstance aFile;
+                long rootPath;
+                using (var sceneFile = File.OpenRead("Raft_Data\\level" + sceneInd))
+                {
+                    aFile = manager.LoadAssetsFile(sceneFile, false);
+                    manager.LoadClassDatabaseFromPackage(aFile.file.Metadata.UnityVersion);
+                    rootPath = aFile.file.GetAssetsOfType(AssetClassID.Transform).Find(x => manager.GetBaseField(aFile, x, AssetReadFlags.SkipMonoBehaviourFields)["m_Father.m_PathID"].AsLong == 0).PathId;
+                    manager.UnloadAllAssetsFiles();
+                }
+                BundleFileInstance bFile;
+                using (var mem = new MemoryStream(GetEmbeddedFileBytes("templatebundle")))
+                {
+                    var name = $"level{sceneInd}loader{UnityEngine.Random.Range(0, ushort.MaxValue + 1):X4}";
+                    bFile = manager.LoadBundleFile(mem, name);
+                    bFile.file.BlockAndDirInfo.DirectoryInfos[0].Name = name;
+                    aFile = manager.LoadAssetsFileFromBundle(bFile, 0, false);
+                    aFile.file.Metadata.Externals[0].PathName = "level" + sceneInd;
+                    var bAsset = aFile.file.GetAssetsOfType(AssetClassID.AssetBundle)[0];
+                    var bField = manager.GetBaseField(aFile, bAsset, AssetReadFlags.SkipMonoBehaviourFields);
+                    bField["m_AssetBundleName"].AsString = bField["m_Name"].AsString = name;
+                    bField["m_Container.Array"][0]["first"].AsString = "scene";
+                    bField["m_Container.Array"][0]["second.asset.m_PathID"].AsLong = rootPath;
+                    bField["m_PreloadTable.Array"][0]["m_PathID"].AsLong = rootPath;
+                    bAsset.SetNewData(bField);
+                    bFile.file.BlockAndDirInfo.DirectoryInfos[0].SetNewData(aFile.file);
+                    if (!Directory.Exists("Mods\\RaftmobileCache"))
+                        Directory.CreateDirectory("Mods\\RaftmobileCache");
+                    File.WriteAllLines("Mods\\RaftmobileCache\\target", new[] {
+                        sceneInd.ToString(),
+                        File.GetLastWriteTimeUtc("Raft_Data\\level" + sceneInd).Ticks.ToString()
+                    });
+                    using (var file = File.Open("Mods\\RaftmobileCache\\loader", FileMode.Create, FileAccess.Write, FileShare.None))
+                    using (var writer = new AssetsFileWriter(file))
+                        bFile.file.Write(writer);
+                }
+            } catch (Exception e)
+            {
+                Debug.LogError(e);
+            }
         }
 
         public void OnModUnload()
@@ -171,13 +280,18 @@ namespace Raftmobile
             if (!shed)
                 return;
             var newShed = waitingToInitialize.gameObject.AddComponent<SnowmobileShed>();
+            if (!newShed)
+                Log("Snowmobile Shed is null!");
             Traverse.Create(newShed).Field("eventRef_respawn").SetValue(Traverse.Create(shed).Field("eventRef_respawn").GetValue());
             var newMobile = Instantiate(Traverse.Create(shed).Field("snowmobilePrefab").GetValue<Snowmobile>(), prefabHolder);
+            if (!newMobile)
+                Log("Snowmobile is null!");
             Traverse.Create(newShed).Field("snowmobilePrefab").SetValue(newMobile);
             waitingToInitialize.networkedIDBehaviour = newShed;
             waitingToInitialize.shed = newShed;
             Traverse.Create(newShed).Field("spawnPoint").SetValue(waitingToInitialize.spawnPoint);
             waitingToInitialize = null;
+            Log("Initialization complete");
         }
 
         public Texture2D LoadImage(string filename, bool leaveReadable = false)
