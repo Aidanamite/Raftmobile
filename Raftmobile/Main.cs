@@ -21,9 +21,7 @@ using Debug = UnityEngine.Debug;
 using Object = UnityEngine.Object;
 using AssetsTools.NET;
 using AssetsTools.NET.Extra;
-using FMOD;
 using System.Threading.Tasks;
-using static SO_TradingPost_Buyable;
 
 
 namespace Raftmobile
@@ -140,7 +138,13 @@ namespace Raftmobile
             yield break;
         }
 
-        IEnumerator UseScene(string sceneName, Action onComplete)
+        IEnumerator UseScene(string sceneName, Action onComplete) =>
+            UseScene(sceneName, x => $"level{x}",
+                (f, m) => f.file.GetAssetsOfType(AssetClassID.Transform)
+                    .Where(x => m.GetBaseField(f, x, AssetReadFlags.SkipMonoBehaviourFields)["m_Father.m_PathID"].AsLong == 0)
+                    .Select(x => x.PathId),
+                onComplete);
+        IEnumerator UseScene(string sceneName, Func<int, string> getAssetsFile, Func<AssetsFileInstance, AssetsManager, IEnumerable<long>> selectAssets, Action onComplete)
         {
             if (SceneManager.GetSceneByName(sceneName).isLoaded)
             {
@@ -151,13 +155,14 @@ namespace Raftmobile
             var sceneInd = SceneUtility.GetBuildIndexByScenePath(sceneName);
             if (sceneInd == -1)
                 throw new FileNotFoundException($"No scene called \"{sceneName}\" was found");
+            string assetFile = getAssetsFile(sceneInd);
             AssetBundleCreateRequest req = null;
             try
-            { 
+            {
                 if (File.Exists("Mods\\RaftmobileCache\\target") && File.Exists("Mods\\RaftmobileCache\\loader"))
                 {
                     var lines = File.ReadAllLines("Mods\\RaftmobileCache\\target");
-                    if (lines?.Length == 2 && int.TryParse(lines[0],out var val) && val == sceneInd && long.TryParse(lines[1],out var time) && time == File.GetLastWriteTimeUtc("Raft_Data\\level" + val).Ticks)
+                    if (lines?.Length == 2 && lines[0] == assetFile && long.TryParse(lines[1], out var time) && time == File.GetLastWriteTimeUtc("Raft_Data\\" + assetFile).Ticks)
                         req = AssetBundle.LoadFromFileAsync("Mods\\RaftmobileCache\\loader");
                 }
             }
@@ -170,8 +175,9 @@ namespace Raftmobile
                 yield return req;
                 if (req.assetBundle)
                 {
-                    var sceneReq = req.assetBundle.LoadAssetAsync("scene");
+                    var sceneReq = req.assetBundle.LoadAllAssetsAsync();
                     yield return sceneReq;
+                    _ = sceneReq.allAssets; // This is not required in 2019 unity, but is required in 2021 unity. Reason: unknown
                     Log("Initializing using cache");
                     try
                     {
@@ -184,15 +190,17 @@ namespace Raftmobile
                     yield break;
                 }
             }
-            var task = CreateLoaderAsync(sceneInd);
+            var task = CreateLoaderAsync(assetFile, selectAssets);
+            Log("Generated cache");
             yield return new WaitUntil(() => task.IsCompleted);
             req = AssetBundle.LoadFromFileAsync("Mods\\RaftmobileCache\\loader");
             yield return req;
             if (!req.assetBundle)
                 yield break;
-            var sceneReq2 = req.assetBundle.LoadAssetAsync("scene");
+            var sceneReq2 = req.assetBundle.LoadAllAssetsAsync();
             yield return sceneReq2;
-            Log("Generated cache and initializing");
+            _ = sceneReq2.allAssets; // This is not required in 2019 unity, but is required in 2021 unity. Reason: unknown
+            Log("Initializing using new cache");
             try
             {
                 onComplete();
@@ -204,49 +212,66 @@ namespace Raftmobile
             yield break;
         }
 
-        Task CreateLoaderAsync(int sceneInd) => Task.Run(() => CreateLoader(sceneInd));
-        void CreateLoader(int sceneInd)
+        Task CreateLoaderAsync(string assetsFile, Func<AssetsFileInstance, AssetsManager, IEnumerable<long>> selectAssets) => Task.Run(() => CreateLoader(assetsFile, selectAssets));
+        void CreateLoader(string assetsFile, Func<AssetsFileInstance, AssetsManager, IEnumerable<long>> selectAssets)
         {
             try
             {
                 var manager = new AssetsManager();
                 using (var data = new MemoryStream(GetEmbeddedFileBytes("lz4.tpk"))) manager.LoadClassPackage(data);
                 AssetsFileInstance aFile;
-                long rootPath;
-                using (var sceneFile = File.OpenRead("Raft_Data\\level" + sceneInd))
+                IEnumerable<long> assets;
+                using (var sceneFile = File.OpenRead("Raft_Data\\" + assetsFile))
                 {
                     aFile = manager.LoadAssetsFile(sceneFile, false);
                     manager.LoadClassDatabaseFromPackage(aFile.file.Metadata.UnityVersion);
-                    rootPath = aFile.file.GetAssetsOfType(AssetClassID.Transform).Find(x => manager.GetBaseField(aFile, x, AssetReadFlags.SkipMonoBehaviourFields)["m_Father.m_PathID"].AsLong == 0).PathId;
+                    assets = selectAssets(aFile, manager).ToList();
                     manager.UnloadAllAssetsFiles();
                 }
                 BundleFileInstance bFile;
                 using (var mem = new MemoryStream(GetEmbeddedFileBytes("templatebundle")))
                 {
-                    var name = $"level{sceneInd}loader{UnityEngine.Random.Range(0, ushort.MaxValue + 1):X4}";
+                    var name = $"{assetsFile}loader{UnityEngine.Random.Range(0, ushort.MaxValue + 1):X4}";
                     bFile = manager.LoadBundleFile(mem, name);
                     bFile.file.BlockAndDirInfo.DirectoryInfos[0].Name = name;
                     aFile = manager.LoadAssetsFileFromBundle(bFile, 0, false);
-                    aFile.file.Metadata.Externals[0].PathName = "level" + sceneInd;
+                    aFile.file.Metadata.Externals[0].PathName = assetsFile;
                     var bAsset = aFile.file.GetAssetsOfType(AssetClassID.AssetBundle)[0];
                     var bField = manager.GetBaseField(aFile, bAsset, AssetReadFlags.SkipMonoBehaviourFields);
                     bField["m_AssetBundleName"].AsString = bField["m_Name"].AsString = name;
-                    bField["m_Container.Array"][0]["first"].AsString = "scene";
-                    bField["m_Container.Array"][0]["second.asset.m_PathID"].AsLong = rootPath;
-                    bField["m_PreloadTable.Array"][0]["m_PathID"].AsLong = rootPath;
+                    int i = 0;
+                    foreach (var p in assets)
+                    {
+                        if (i == bField["m_Container.Array"].Children.Count)
+                        {
+                            bField["m_Container.Array"].Children.Add(ValueBuilder.DefaultValueFieldFromArrayTemplate(bField["m_Container.Array"]));
+                            bField["m_PreloadTable.Array"].Children.Add(ValueBuilder.DefaultValueFieldFromArrayTemplate(bField["m_PreloadTable.Array"]));
+                        }
+                        bField["m_Container.Array"][i]["first"].AsString = $"asset{i}";
+                        bField["m_Container.Array"][i]["second.preloadIndex"].AsInt = i;
+                        bField["m_Container.Array"][i]["second.preloadSize"].AsInt = 1;
+                        bField["m_Container.Array"][i]["second.asset.m_FileID"].AsInt = 1;
+                        bField["m_Container.Array"][i]["second.asset.m_PathID"].AsLong = p;
+                        bField["m_PreloadTable.Array"][i]["m_FileID"].AsInt = 1;
+                        bField["m_PreloadTable.Array"][i]["m_PathID"].AsLong = p;
+                        i++;
+                    }
                     bAsset.SetNewData(bField);
                     bFile.file.BlockAndDirInfo.DirectoryInfos[0].SetNewData(aFile.file);
                     if (!Directory.Exists("Mods\\RaftmobileCache"))
                         Directory.CreateDirectory("Mods\\RaftmobileCache");
+                    if (File.Exists("Mods\\RaftmobileCache\\loader"))
+                        File.Delete("Mods\\RaftmobileCache\\loader");
                     File.WriteAllLines("Mods\\RaftmobileCache\\target", new[] {
-                        sceneInd.ToString(),
-                        File.GetLastWriteTimeUtc("Raft_Data\\level" + sceneInd).Ticks.ToString()
+                        assetsFile,
+                        File.GetLastWriteTimeUtc("Raft_Data\\" + assetsFile).Ticks.ToString()
                     });
                     using (var file = File.Open("Mods\\RaftmobileCache\\loader", FileMode.Create, FileAccess.Write, FileShare.None))
                     using (var writer = new AssetsFileWriter(file))
                         bFile.file.Write(writer);
                 }
-            } catch (Exception e)
+            }
+            catch (Exception e)
             {
                 Debug.LogError(e);
             }
@@ -349,7 +374,7 @@ namespace Raftmobile
             shed.SpawnSnowmobileNetwork();
         }
 
-        protected override void Start()
+        public override void Start()
         {
             base.Start();
             localPlayer = ComponentManager<Network_Player>.Value;
@@ -395,7 +420,7 @@ namespace Raftmobile
             }
         }
 
-        protected override void OnDestroy()
+        public override void OnDestroy()
         {
             base.OnDestroy();
             shed?.spawnedSnowmobile?.MakeAllPlayersLeave();
